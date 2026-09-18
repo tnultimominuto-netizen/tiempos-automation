@@ -1,0 +1,155 @@
+name: TIEMPOS Central Learning - Zero Cost
+
+on:
+  schedule:
+    - cron: '25 18 * * *' # 12:25 CR - predraw midday
+    - cron: '10 19 * * *' # 13:10 CR - postdraw midday
+    - cron: '55 21 * * *' # 15:55 CR - predraw afternoon
+    - cron: '45 22 * * *' # 16:45 CR - postdraw afternoon
+    - cron: '55 0 * * *'  # 18:55 CR - predraw night
+    - cron: '45 1 * * *'  # 19:45 CR - postdraw night
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: What to run
+        required: true
+        type: choice
+        options: [healthcheck, predraw, postdraw]
+      period:
+        description: Draw period (ignored by healthcheck)
+        required: true
+        default: midday
+        type: choice
+        options: [midday, afternoon, night]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tiempos-central-${{ github.event.schedule || format('{0}-{1}', inputs.mode, inputs.period) }}
+  cancel-in-progress: false
+
+jobs:
+  central:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      PRIVATE_REPO: tnultimominuto-netizen/radar-de-suerte
+      PRIVATE_REF: tiempos/current
+    steps:
+      - name: Checkout automation repository
+        uses: actions/checkout@v4
+
+      - name: Resolve mode and period
+        id: resolve
+        shell: bash
+        env:
+          SCHEDULE: ${{ github.event.schedule }}
+          MANUAL_MODE: ${{ inputs.mode }}
+          MANUAL_PERIOD: ${{ inputs.period }}
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            mode="$MANUAL_MODE"
+            period="$MANUAL_PERIOD"
+          else
+            case "$SCHEDULE" in
+              "25 18 * * *") mode="predraw"; period="midday" ;;
+              "10 19 * * *") mode="postdraw"; period="midday" ;;
+              "55 21 * * *") mode="predraw"; period="afternoon" ;;
+              "45 22 * * *") mode="postdraw"; period="afternoon" ;;
+              "55 0 * * *") mode="predraw"; period="night" ;;
+              "45 1 * * *") mode="postdraw"; period="night" ;;
+              *) echo "Unknown schedule: $SCHEDULE" >&2; exit 1 ;;
+            esac
+          fi
+          echo "mode=$mode" >> "$GITHUB_OUTPUT"
+          echo "period=$period" >> "$GITHUB_OUTPUT"
+
+      - name: Verify required secrets
+        shell: bash
+        env:
+          TIEMPOS_REPO_TOKEN: ${{ secrets.TIEMPOS_REPO_TOKEN }}
+          FIREBASE_SERVICE_ACCOUNT_JSON: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_JSON }}
+        run: |
+          set -euo pipefail
+          [ -n "$TIEMPOS_REPO_TOKEN" ] || { echo "Missing TIEMPOS_REPO_TOKEN"; exit 1; }
+          [ -n "$FIREBASE_SERVICE_ACCOUNT_JSON" ] || { echo "Missing FIREBASE_SERVICE_ACCOUNT_JSON"; exit 1; }
+
+      - name: Download private TIEMPOS source
+        shell: bash
+        env:
+          TIEMPOS_REPO_TOKEN: ${{ secrets.TIEMPOS_REPO_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir -p private-src
+          curl --fail --silent --show-error --location \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer $TIEMPOS_REPO_TOKEN" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/$PRIVATE_REPO/tarball/$PRIVATE_REF" \
+            -o private-src.tar.gz
+          tar -xzf private-src.tar.gz -C private-src --strip-components=1
+          test -f private-src/functions/run_central_learning.js
+          test -f private-src/mobile/assets/data/historical_results.json
+
+      - name: Set up Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: private-src/functions/package-lock.json
+
+      - name: Install and validate central backend
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm ci --prefix private-src/functions
+          npm --prefix private-src/functions run check
+          npm --prefix private-src/functions test
+
+      - name: Firebase healthcheck
+        if: steps.resolve.outputs.mode == 'healthcheck'
+        shell: bash
+        env:
+          FIREBASE_SERVICE_ACCOUNT_JSON: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_JSON }}
+        run: |
+          set -euo pipefail
+          cd private-src
+          node - <<'NODE'
+          const { initializeApp, cert } = require('firebase-admin/app');
+          const { getFirestore, FieldValue } = require('firebase-admin/firestore');
+          const raw = process.env.FIREBASE_SERVICE_ACCOUNT_JSON;
+          const credentials = JSON.parse(raw);
+          if (credentials.project_id !== 'radar-de-suerte') {
+            throw new Error('Firebase project mismatch: expected radar-de-suerte');
+          }
+          initializeApp({ credential: cert(credentials), projectId: 'radar-de-suerte' });
+          const db = getFirestore();
+          const ref = db.collection('prospective_global').doc('automation_healthcheck');
+          (async () => {
+            await ref.set({
+              ok: true,
+              source: 'tiempos-public-zero-cost-runner',
+              checkedAt: FieldValue.serverTimestamp(),
+            });
+            const snap = await ref.get();
+            if (!snap.exists || snap.get('ok') !== true) throw new Error('Firestore readback failed');
+            await ref.delete();
+            console.log('TIEMPOS Firebase healthcheck OK');
+          })().catch((error) => {
+            console.error(error.message);
+            process.exit(1);
+          });
+          NODE
+
+      - name: Run central learning
+        if: steps.resolve.outputs.mode != 'healthcheck'
+        shell: bash
+        env:
+          FIREBASE_SERVICE_ACCOUNT_JSON: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_JSON }}
+        run: |
+          set -euo pipefail
+          node private-src/functions/run_central_learning.js \
+            --mode "${{ steps.resolve.outputs.mode }}" \
+            --period "${{ steps.resolve.outputs.period }}"
