@@ -115,6 +115,26 @@ jobs:
           npm --prefix private-src/functions run check
           npm --prefix private-src/functions test
 
+      - name: Set up Flutter for integration validation
+        if: github.event_name == 'push'
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.44.8'
+          channel: stable
+          cache: true
+
+      - name: Validate cloud-history Flutter integration
+        if: github.event_name == 'push'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd private-src/mobile
+          flutter pub get
+          flutter analyze \
+            lib/main.dart \
+            lib/features/draws/repository/draw_repository.dart \
+            lib/features/draws/services/cloud_historical_archive_service.dart
+
       - name: Sync central historical archive
         continue-on-error: true
         shell: bash
