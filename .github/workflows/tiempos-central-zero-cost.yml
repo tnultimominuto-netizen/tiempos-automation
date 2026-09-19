@@ -1,6 +1,10 @@
 name: TIEMPOS Central Learning - Zero Cost
 
 on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/tiempos-central-zero-cost.yml'
   schedule:
     - cron: '25 18 * * *' # 12:25 CR - predraw midday
     - cron: '10 19 * * *' # 13:10 CR - postdraw midday
@@ -49,7 +53,10 @@ jobs:
           MANUAL_PERIOD: ${{ inputs.period }}
         run: |
           set -euo pipefail
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+          if [ "${{ github.event_name }}" = "push" ]; then
+            mode="healthcheck"
+            period="midday"
+          elif [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             mode="$MANUAL_MODE"
             period="$MANUAL_PERIOD"
           else
