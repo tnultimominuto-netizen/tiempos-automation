@@ -115,6 +115,14 @@ jobs:
           npm --prefix private-src/functions run check
           npm --prefix private-src/functions test
 
+      - name: Sync central historical archive
+        shell: bash
+        env:
+          FIREBASE_SERVICE_ACCOUNT_JSON: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_JSON }}
+        run: |
+          set -euo pipefail
+          node private-src/functions/run_historical_archive_sync.js
+
       - name: Firebase healthcheck
         if: steps.resolve.outputs.mode == 'healthcheck'
         shell: bash
@@ -123,7 +131,7 @@ jobs:
         run: |
           set -euo pipefail
           cd private-src
-          node - <<'NODE'
+          NODE_PATH=functions/node_modules node - <<'NODE'
           const { initializeApp, cert } = require('firebase-admin/app');
           const { getFirestore, FieldValue } = require('firebase-admin/firestore');
           const raw = process.env.FIREBASE_SERVICE_ACCOUNT_JSON;
